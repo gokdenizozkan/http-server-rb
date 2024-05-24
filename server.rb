@@ -1,26 +1,30 @@
 require "socket"
 
 class Response
-  @@HTTP_VERSION = {:v1_1 => "HTTP/1.1"}
-  @@HTTP_STATUS = {:ok => 200, :created => 201, :not_found => 404}
+  HTTP_VERSION = {:v1_1 => "HTTP/1.1"}
+  HTTP_STATUS = {:ok => 200, :created => 201, :not_found => 404, :bad_request => 400}
 
   def self.of
-    Response.new
+    new
   end
 
-  def self.ok(body, content_type)
-    Response.new.version(:v1_1).status(:ok).body(body).content_length(body.length).content_type(content_type)
+  def self.ok(body=nil, content_type=nil)
+    new.version(:v1_1).status(:ok).body(body).content_type(content_type)
   end
 
-  def self.created(body, content_type)
-    unless body and content_type
-      Response.new.version(:v1_1).status(:created)
+  def self.created(body=nil, content_type=nil)
+    if body.nil? and content_type.nil?
+      new.version(:v1_1).status(:created)
     end
-    Response.new.version(:v1_1).status(:created).body(body).content_length(body.length).content_type(content_type)
+    new.version(:v1_1).status(:created).body(body).content_type(content_type)
   end
 
   def self.not_found
-    Response.new.version(:v1_1).status(:not_found)
+    new.version(:v1_1).status(:not_found)
+  end
+
+  def self.bad_request
+    new.version(:v1_1).status(:bad_request)
   end
 
   def version(v)
@@ -45,22 +49,20 @@ class Response
 
   def body(b)
     @body = b
+    @content_length = b.length unless b.nil?
     return self
   end
 
   def to_s
-    unless @body
-      return "#{@@HTTP_VERSION[@version]} #{@@HTTP_STATUS[@status]} #{@status.to_s.split('_').join(' ').upcase}\r\n\r\n"
-    end
+    response_line = "#{HTTP_VERSION[@version]} #{HTTP_STATUS[@status]} #{@status.to_s.split('_').join(' ').upcase}\r\n"
+    return response_line + "\r\n" if @body.nil?
 
-    return "#{@@HTTP_VERSION[@version]} #{@@HTTP_STATUS[@status]} #{@status.to_s.split('_').join(' ').upcase}\r\n" +
-    "Content-Type: #{@content_type}\r\n" +
-    "Content-Length: #{@content_length}\r\n\r\n" +
-    @body
+    "#{response_line}Content-Type: #{@content_type}\r\nContent-Length: #{@content_length}\r\n\r\n#{@body}"
   end
 end
 
 puts "Logging starts..."
+puts ARGV[1]
 
 server = TCPServer.new("localhost", 1423)
 
@@ -74,49 +76,42 @@ loop do
       headers[line[0].chop] = line[1].strip
     end
 
-    options = {}
-    (0...ARGV.length - 1).step(2).each do |i|
-      options[ARGV[i]] = ARGV[i + 1]
-    end
+    options = ARGV.each_slice(2).to_h
 
     case method
     when "GET"
-      if path == "/"
-        client.puts "HTTP/1.1 200 OK\r\n\r\n"
-        client.puts headers
-      elsif path.start_with?("/echo/")
-        content = path.split("/").last
-        client.puts Response.ok(content, "text/plain").to_s
-      elsif path.start_with?("/user-agent")
-        user_agent = headers["User-Agent"]
-        client.puts Response.ok(user_agent, "text/plain").to_s
-      elsif path.start_with?("/files/")
-        file_name = path.split("/").last
-        file_path = "#{options["--directory"]}/#{file_name}"
-        if File.exist?(file_path)
-          file = File.open(file_path, "rb")
-          file_content = file.read
-          client.puts Response.ok(file_content, "application/octet-stream").to_s
-        else
-          client.puts Response.not_found.to_s
-        end
-      else
-        client.puts Response.not_found.to_s
-      end
+      response = case path
+                when '/'
+                  Response.ok
+                when /\/echo\/(.*)/
+                   Response.ok($1, 'text/plain').to_s
+                when '/user-agent'
+                  Response.ok(headers['User-Agent'], 'text/plain').to_s
+                when /\/files\/(.*)/
+                  file_path = "#{options["--directory"]}/#{$1}"
+                  if File.exist?(file_path)
+                    file_content = File.binread(file_path)
+                    Response.ok(file_content, 'application/octet-stream').to_s
+                  else
+                    Response.not_found.to_s
+                  end
+                else
+                  Response.not_found.to_s  
+                end
+      client.puts response
     when "POST"
-      if path.start_with?("/files/")
-        file_name = path.split("/").last
-        file_path = "#{options["--directory"]}/#{file_name}"
-
-        content_length = headers["Content-Length"].to_i
-        file_content = client.read(content_length)
-
-        File.open(file_path, "wb") { |file| file.write(file_content) }
-
-        client.puts Response.created
-      end
+      response = case path
+                when /\/files\/(.*)/
+                  file_path = "#{options["--directory"]}/#{$1}"
+                  content_length = headers["Content-Length"].to_i
+                  file_content = client.read(content_length)
+                  File.binwrite(file_path, file_content)
+                  Response.created.to_s
+                else
+                  Response.bad_request.to_s
+                end
+      client.puts response
     end
-
     client.close
   end
 end
