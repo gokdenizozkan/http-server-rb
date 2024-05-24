@@ -1,3 +1,5 @@
+require "socket"
+
 class Response
   @@HTTP_VERSION = {:v1_1 => "HTTP/1.1"}
   @@HTTP_STATUS = {:ok => 200, :created => 201, :not_found => 404}
@@ -55,5 +57,66 @@ class Response
     "Content-Type: #{@content_type}\r\n" +
     "Content-Length: #{@content_length}\r\n\r\n" +
     @body
+  end
+end
+
+puts "Logging starts..."
+
+server = TCPServer.new("localhost", 1423)
+
+loop do
+  Thread.start(server.accept) do |client|
+    method, path, _ = client.gets.split
+  
+    headers = {}
+    while line = client.gets.split(' ', 2)
+      break if line[0] == ""
+      headers[line[0].chop] = line[1].strip
+    end
+
+    options = {}
+    (0...ARGV.length - 1).step(2).each do |i|
+      options[ARGV[i]] = ARGV[i + 1]
+    end
+
+    case method
+    when "GET"
+      if path == "/"
+        client.puts "HTTP/1.1 200 OK\r\n\r\n"
+        client.puts headers
+      elsif path.start_with?("/echo/")
+        content = path.split("/").last
+        client.puts Response.ok(content, "text/plain").to_s
+      elsif path.start_with?("/user-agent")
+        user_agent = headers["User-Agent"]
+        client.puts Response.ok(user_agent, "text/plain").to_s
+      elsif path.start_with?("/files/")
+        file_name = path.split("/").last
+        file_path = "#{options["--directory"]}/#{file_name}"
+        if File.exist?(file_path)
+          file = File.open(file_path, "rb")
+          file_content = file.read
+          client.puts Response.ok(file_content, "application/octet-stream").to_s
+        else
+          client.puts Response.not_found.to_s
+        end
+      else
+        client.puts Response.not_found.to_s
+      end
+    when "POST"
+      if path.start_with?("/files/")
+        file_name = path.split("/").last
+        file_path = "#{options["--directory"]}/#{file_name}"
+
+        content_length = headers["Content-Length"].to_i
+        file_content = client.read(content_length)
+
+        File.open(file_path, "wb") { |file| file.write(file_content) }
+
+        client.puts Response.created
+      end
+    end
+
+    client.close
   end
 end
